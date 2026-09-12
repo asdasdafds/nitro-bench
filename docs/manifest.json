@@ -1,0 +1,9 @@
+{
+  "name": "nitro-bench",
+  "description": "nitro booster spoof, soundboard unlock, and /sb soundboard playback command.",
+  "authors": [
+    { "name": "asdasdafds", "id": "258577658" }
+  ],
+  "main": "index.js",
+  "hash": "1"
+}
