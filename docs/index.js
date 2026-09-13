@@ -1,22 +1,27 @@
 ((vendetta) => {
-  // nitro-bench v2 — vendetta-contract plugin
-  // premium + server-boost-tier spoof, soundboard gate unlock,
-  // /sb play path mirroring the real picker (local + relay dispatch),
-  // /sbprobe prints per-build resolution so the relay can be re-derived.
+  // nitro-bench v3 — vendetta-contract plugin
+  // - guild premiumTier stamping (real boost-tier bypass)
+  // - USE_SOUNDBOARD permission force
+  // - premium spoof
+  // - /sb play (picker-mirror payload)
+  // - /sbdump: runtime sweep of the client for real soundshare/soundboard
+  //   modules so the transmit path can be re-derived from dj's build
   const { metro, commands, patcher } = vendetta;
   const byProps = metro.findByProps || (() => null);
   const byName = metro.findByName || (() => null);
   const byStore = metro.findByStoreName || (() => null);
+  const findAll = metro.findAll || (() => []);
   const common = metro.common || {};
   const FluxDispatcher = common.FluxDispatcher;
 
   const STRING = 3;
-  const state = { spoof: true, gates: [], tierPatched: [], play: null, relaySent: false };
+  const state = { spoof: true, guard: true, play: null, relaySent: false, permTried: false };
   const teardown = [];
+  let candidates = null;
 
-    function except(fn) { try { return fn(); } catch { return undefined; } }
+  function except(fn) { try { return fn(); } catch { return undefined; } }
 
-  // ---------------- premium + boost tier spoof (client-side, stable) ------------
+  // ---------------- premium spoof (client-side) -----------------------------------
   function patchPremium() {
     const UserStore = byStore("UserStore");
     if (!UserStore || typeof UserStore.getCurrentUser !== "function") {
@@ -29,7 +34,7 @@
           premiumType: 2,
           premium: true,
           premiumSince: user.premiumSince ?? "2020-01-01T00:00:00.000Z",
-          flags: (user.flags || 0) | (1 << 9) // PREMIUM_EARLY_SUPPORTER
+          flags: (user.flags || 0) | (1 << 9)
         });
       }
       return user;
@@ -37,41 +42,78 @@
     console.log("[nitro-bench] premium patched");
   }
 
-  // helper: patch every found gate predicate of a name-set to return true
-  const EDGE_MODULES = [
-    ["canPlaySound"], ["useCanPlaySound"], ["canUseSoundboard"],
-    ["isSoundboardBlocked"], ["isSoundboardPotentiallyUnavailable"],
-    ["isSoundboardModeDenied"], ["isSoundboardAvailable"],
-    ["hasSoundboardAccess"], ["hasEnhancedSoundsByUser"]
-  ];
-  const TIER_MODULES = [
-    ["getSoundboardTier"], ["getBoostLevel"], ["getGuildPremiumTier"],
-    ["getPremiumTier"], ["getPremiumMaxTierCount"]
-  ];
-
-  function patchGates() {
-    for (const props of EDGE_MODULES) {
-      const mod = except(() => byProps(...props));
-      if (!mod) continue;
-      for (const key of props) {
-        const fn = except(() => mod[key]);
-        if (typeof fn === "function") {
-          // predicates return boolean|null; bool gates -> true, count gates -> 3
-          if (/Tier|Count|Level$/.test(key)) {
-            teardown.push(patcher.instead(key, mod, () => 3));
-            state.tierPatched.push(key);
-          } else {
-            teardown.push(patcher.instead(key, mod, () => true));
-            state.gates.push(key);
+  // ---------------- boost-tier bypass: stamp the guild, force the permission -----
+  function patchBoost() {
+    const GuildStore = byStore("GuildStore");
+    if (GuildStore && typeof GuildStore.getGuild === "function") {
+      teardown.push(patcher.after("getGuild", GuildStore, (_a, guild) => {
+        if (guild && state.guard) {
+          guild.premiumTier = 3;
+          guild.boostCount = 100;
+          guild.boostProgressBarEnabled = true;
+        }
+        return guild;
+      }));
+    }
+    if (GuildStore && typeof GuildStore.getGuilds === "function") {
+      teardown.push(patcher.after("getGuilds", GuildStore, (_a, map) => {
+        if (map && state.guard) {
+          const list = map && typeof map.values === "function" ? Array.from(map.values()) : Object.values(map);
+          for (const g of list) {
+            if (g) { g.premiumTier = 3; g.boostCount = 100; }
           }
         }
-      }
+        return map;
+      }));
     }
-    console.log("[nitro-bench] gates unblocked:", state.gates.join(",") || "none");
-    console.log("[nitro-bench] tier forced:", state.tierPatched.join(",") || "none");
+    const PermStore = byStore("PermissionStore");
+    if (PermStore && typeof PermStore.can === "function") {
+      teardown.push(patcher.instead("can", PermStore, (args, orig) => {
+        if (state.guard && args && (args[0] === "USE_SOUNDBOARD" || args[1] === "USE_SOUNDBOARD")) return true;
+        return orig(...args);
+      }));
+    }
+    console.log("[nitro-bench] boost stamp installed");
   }
 
-  // ---------------- play path: mirror the real picker (local + relay) ------------
+  // ---------------- runtime sweep: find the real transmit modules ----------------
+  const HAYSTACK_KEYS = /soundboard|soundshare|SOUNDSHARE|bin.?audio|SOUNDBOARD/i;
+  function scan() {
+    if (candidates) return candidates;
+    candidates = [];
+    const seen = new Set();
+    findAll((m) => {
+      if (!m || (!(typeof m === "object") && typeof m !== "function")) return false;
+      let keys = [];
+      try {
+        if (typeof m === "function") keys = [""];
+        else keys = Object.keys(m);
+      } catch { return false; }
+      if (keys.length > 300) keys = keys.slice(0, 300);
+      let hitKey = null;
+      let hitSrc = null;
+      for (const k of keys) {
+        let v;
+        try { v = k === "" ? m : m[k]; } catch { continue; }
+        if (typeof v !== "function") continue;
+        let s;
+        try { s = Function.prototype.toString.call(v); } catch { continue; }
+        if (HAYSTACK_KEYS.test(s)) { hitKey = k; hitSrc = s; break; }
+      }
+      if (hitKey !== null) {
+        if (seen.has(m)) return false;
+        seen.add(m);
+        try {
+          candidates.push({ keys, key: hitKey, src: hitSrc });
+        } catch { /* vol */ }
+        return m;
+      }
+      return false;
+    });
+    return candidates;
+  }
+
+  // ---------------- play path ------------------------------------------------------
   function findPlay() {
     const cands = [
       () => byProps("SoundboardActions"),
@@ -91,16 +133,12 @@
   }
 
   function emitRelay(chan, gid, sid) {
-    // the picker broadcasts play via flux + gateway voice frame; fire both best-guesses
     const attempts = [];
     if (FluxDispatcher && typeof FluxDispatcher.dispatch === "function") {
       for (const type of ["SOUNDBOARD_PLAY", "SOUNDBOARD_PLAY_AUDIO", "PLAY_SOUNDBOARD_SOUND", "SOUNDBOARD_TOGGLE"]) {
         except(() => {
           FluxDispatcher.dispatch({
-            type,
-            soundId: sid,
-            guildId: gid,
-            channelId: chan,
+            type, soundId: sid, guildId: gid, channelId: chan,
             sound: { id: sid, guild_id: gid }
           });
           attempts.push(type);
@@ -126,24 +164,18 @@
     const res = [];
     try {
       found.fn(sound, {
-        channelId: chan,
-        guildId: gid,
-        soundId: sid,
+        channelId: chan, guildId: gid, soundId: sid,
         location: "VOICE_CHANNEL_SOUNDBOARD_BUTTON",
-        streamType: "SOUNDBOARD",
-        emitFx: true
+        streamType: "SOUNDBOARD", emitFx: true
       });
       res.push("play invoked");
-    } catch (e) {
-      res.push("play threw: " + (e && e.message));
-    }
+    } catch (e) { res.push("play threw: " + (e && e.message)); }
     const relay = emitRelay(chan, gid, sid);
-    if (relay.length) res.push("relay events: " + relay.join(","));
-    else res.push("no relay dispatch possible");
+    res.push(relay.length ? "relay:" + relay.join(",") : "no relay");
     return { content: "played " + (sound.name || sid) + " [" + res.join(" | ") + "]" };
   }
 
-  // ---------------- soundboard listing -------------------------------------------
+  // ---------------- listing ---------------------------------------------------------
   async function listSounds(ctx) {
     const channelId = common.channels && common.channels.getVoiceChannelId();
     if (!channelId) return { error: "not in a voice channel" };
@@ -167,7 +199,13 @@
     return { sounds: arr.filter((s) => s && typeof s === "object"), channelId, guildId, chan };
   }
 
-  // ---------------- commands ------------------------------------------------------
+  function permCheck(channelId) {
+    const PermStore = byStore("PermissionStore");
+    if (!PermStore) return "n/a";
+    try { return PermStore.can("USE_SOUNDBOARD", channelId) ? "ok" : "blocked"; } catch { return "err"; }
+  }
+
+  // ---------------- commands --------------------------------------------------------
   const unreg = [];
   function cmd(def) { if (commands && typeof commands.registerCommand === "function") unreg.push(commands.registerCommand(def)); }
 
@@ -196,12 +234,13 @@
 
     cmd({
       name: "nitro", displayName: "nitro",
-      description: "toggle nitro + boost spoof",
-      displayDescription: "toggle nitro + boost spoof",
+      description: "toggle premium + boost spoof",
+      displayDescription: "toggle premium + boost spoof",
       options: [{ name: "on", description: "1 or 0", displayName: "on", displayDescription: "1 or 0", required: false, type: STRING }],
       execute: (args) => {
         const v = ((args || []).find((a) => a.name === "on") || {}).value;
         state.spoof = !(v === "0" || v === "off");
+        state.guard = state.spoof;
         try { vendetta.plugin.storage.spoof = state.spoof; } catch { /* vol */ }
         return { content: "spoof " + (state.spoof ? "ON" : "off") + " (client-side)" };
       }
@@ -209,33 +248,55 @@
 
     cmd({
       name: "sbprobe", displayName: "sbprobe",
-      description: "print per-build soundboard resolution",
-      displayDescription: "print per-build soundboard resolution",
+      description: "resolution report",
+      displayDescription: "resolution report",
       options: [],
       execute: async (args, ctx) => {
         const res = await listSounds(ctx).catch((e) => ({ error: String(e && e.message) }));
+        const cid = res.channelId || (ctx.channel && ctx.channel.id);
         const lines = [
           "premium:" + (state.spoof ? "on" : "off"),
-          "gates:" + (state.gates.length ? state.gates.join(",") : "none"),
-          "tier:" + (state.tierPatched.length ? state.tierPatched.join(",") : "none"),
+          "boostStamp:" + (state.guard ? "on" : "off"),
+          "perm:" + (cid ? permCheck(cid) : "n/a"),
           "play:" + (state.play || "not-found"),
           "relay:" + (state.relaySent ? "sent" : "not-sent"),
+          "cands:" + (candidates ? candidates.length : "unscanned"),
           "sounds:" + (res.sounds ? res.sounds.length : res.error || "n/a")
         ];
         return { content: "[sbprobe] " + lines.join(" | ") };
+      }
+    });
+
+    cmd({
+      name: "sbdump", displayName: "sbdump",
+      description: "dump soundshare/soundboard modules from this build",
+      displayDescription: "dump soundshare/soundboard modules from this build",
+      options: [],
+      execute: async () => {
+        let c;
+        try { c = scan(); } catch (e) { return { content: "scan failed: " + String(e && e.message) }; }
+        const out = [];
+        for (let i = 0; i < c.length; i++) {
+          const m = c[i];
+          const src = (m.src || "").replace(/\s+/g, " ");
+          out.push((i + 1) + ". key=[" + m.key + "] keys=" + m.keys.length + " src=" + src.slice(0, 150));
+        }
+        if (!out.length) return { content: "[sbdump] no soundshare/soundboard module matched this build" };
+        return { content: "[sbdump] " + out.length + " hit\n" + out.join("\n").slice(0, 1900) };
       }
     });
   }
 
   return {
     name: "nitro-bench",
-    description: "nitro + boost-tier spoof, soundboard unlock, /sb play.",
+    description: "nitro + boost-tier spoof, soundboard unlock, /sb play, /sbdump.",
     authors: [{ name: "asdasdafds", id: "258577658" }],
     onLoad() {
       except(() => { state.spoof = vendetta.plugin.storage.spoof ?? true; });
+      state.guard = state.spoof;
       console.warn("[nitro-bench] starting");
       patchPremium();
-      patchGates();
+      patchBoost();
       register();
       console.log("[nitro-bench] loaded");
     },
