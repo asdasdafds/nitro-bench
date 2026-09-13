@@ -1,5 +1,6 @@
 ((vendetta) => {
-  // nitro-bench v6 — full booster-perk unlock (multi-layer)
+  // nitro-bench v8 — crash-safe build: no render-hook overrides, no playback hijack;
+  // perk unlock via guild stamp + store getters + non-render gate booleans.
   // layers: guild object stamp + MemberStore.premiumSince + PermissionStore.can
   // + runtime auto-calibrated perk-gate override (type-sniffed per function)
   // + broadcast autopilot on real playSound modules.
@@ -116,14 +117,11 @@
     "getMaxGuildEmojis", "getMaxGuildStickers", "getMaxSoundboardSounds",
     "getMaxSoundboardSlots", "getMaxEmojiSlots", "getMaxStickerSlots"
   ];
-  // CONFIRMED identifiers from the actual client bundle (index.android.bundle string table)
+  // CONFIRMED identifiers from the actual client bundle (index.android.bundle string table).
+  // NOTE: render-domain hooks (use*) crashed the app — those are NOT patched anymore.
   const EXACT_BOOL = [
-    "canChannelUseSoundboard", "useCanChannelUseSoundboardPickerType",
-    "hasPermissionToPlaySoundboard", "useSoundboardSoundPreviewEnabled",
-    "shouldSkipMuteUnmuteSoundboard", "canMakeSoundboardPickerStore"
-  ];
-  const EXACT_LOCK_MUTE = [
-    "useSoundboardSoundLock", "handleSpeakingWhileMuted"
+    "canChannelUseSoundboard", "hasPermissionToPlaySoundboard",
+    "shouldSkipMuteUnmuteSoundboard"
   ];
   const EXACT_MAX = ["getMaxSoundboardSlots"];
   const BOOST_AGED = new Date("2018-01-01").getTime();
@@ -166,6 +164,8 @@
           try { v = m[k]; } catch { continue; }
           if (typeof v !== "function") continue;
           if (/^(play|stop|pause|seek)/i.test(k)) continue; // never hijack playback
+          if (/^use[A-Z]/.test(k)) continue; // render hooks crash the UI — never touch
+          if (/^should[A-Z]/.test(k)) continue; // routing decisions are load-bearing
           let s;
           try { s = Function.prototype.toString.call(v); } catch { continue; }
           scanned++;
@@ -204,7 +204,8 @@
     toast("[nitro-bench] perks=" + state.perks);
   }
 
-  // confirmed exact-shape patches
+  // confirmed exact-shape patches — only non-render functions; render load-bearing
+  // use* hooks are intentionally NOT touched (they crashed the app in v7).
   function patchExact() {
     for (const key of EXACT_BOOL) {
       const mod = except(() => byName(key));
@@ -217,30 +218,6 @@
       if (mod && typeof mod[key] === "function") {
         try { overflow(key, mod, 100); state.perks++; console.log("[nitro-bench] exactMax:", key); } catch { /* vol */ }
       }
-    }
-    // lock hook returns a state object; return a fully-unlocked blob (truthy object covers
-    // both .canUse/.canPlay usage and truthy-boolean usage)
-    const lock = except(() => byName("useSoundboardSoundLock"));
-    if (lock && typeof lock.useSoundboardSoundLock === "function") {
-      try {
-        teardown.push(patcher.instead("useSoundboardSoundLock", lock, (args, orig) => {
-          if (state.guard) return { locked: false, isLocked: false, canUse: true, canPlay: true, canUseSoundboard: true, reason: null, tier: 3, result: true };
-          return orig(...args);
-        }));
-        state.perks++;
-        console.log("[nitro-bench] soundboard lock force-disabled");
-      } catch { /* vol */ }
-    }
-    const mute = except(() => byName("handleSpeakingWhileMuted"));
-    if (mute && typeof mute.handleSpeakingWhileMuted === "function") {
-      try {
-        teardown.push(patcher.instead("handleSpeakingWhileMuted", mute, (args, orig) => {
-          if (state.guard) return undefined; // swallow mute-gated speaking suppression
-          return orig(...args);
-        }));
-        state.perks++;
-        console.log("[nitro-bench] muted-speak suppression disabled");
-      } catch { /* vol */ }
     }
   }
 
