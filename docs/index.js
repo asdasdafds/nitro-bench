@@ -116,6 +116,16 @@
     "getMaxGuildEmojis", "getMaxGuildStickers", "getMaxSoundboardSounds",
     "getMaxSoundboardSlots", "getMaxEmojiSlots", "getMaxStickerSlots"
   ];
+  // CONFIRMED identifiers from the actual client bundle (index.android.bundle string table)
+  const EXACT_BOOL = [
+    "canChannelUseSoundboard", "useCanChannelUseSoundboardPickerType",
+    "hasPermissionToPlaySoundboard", "useSoundboardSoundPreviewEnabled",
+    "shouldSkipMuteUnmuteSoundboard", "canMakeSoundboardPickerStore"
+  ];
+  const EXACT_LOCK_MUTE = [
+    "useSoundboardSoundLock", "handleSpeakingWhileMuted"
+  ];
+  const EXACT_MAX = ["getMaxSoundboardSlots"];
   const BOOST_AGED = new Date("2018-01-01").getTime();
 
   function overflow(key, mod, value) {
@@ -192,6 +202,60 @@
     }
     console.log("[nitro-bench] wrap scanned:", scanned, "perk overrides:", state.perks);
     toast("[nitro-bench] perks=" + state.perks);
+  }
+
+  // confirmed exact-shape patches
+  function patchExact() {
+    for (const key of EXACT_BOOL) {
+      const mod = except(() => byName(key));
+      if (mod && typeof mod[key] === "function") {
+        try { overflow(key, mod, true); state.perks++; console.log("[nitro-bench] exactPoke:", key); } catch { /* vol */ }
+      }
+    }
+    for (const key of EXACT_MAX) {
+      const mod = except(() => byName(key)) || except(() => byProps(key));
+      if (mod && typeof mod[key] === "function") {
+        try { overflow(key, mod, 100); state.perks++; console.log("[nitro-bench] exactMax:", key); } catch { /* vol */ }
+      }
+    }
+    // lock hook returns a state object; return a fully-unlocked blob (truthy object covers
+    // both .canUse/.canPlay usage and truthy-boolean usage)
+    const lock = except(() => byName("useSoundboardSoundLock"));
+    if (lock && typeof lock.useSoundboardSoundLock === "function") {
+      try {
+        teardown.push(patcher.instead("useSoundboardSoundLock", lock, (args, orig) => {
+          if (state.guard) return { locked: false, isLocked: false, canUse: true, canPlay: true, canUseSoundboard: true, reason: null, tier: 3, result: true };
+          return orig(...args);
+        }));
+        state.perks++;
+        console.log("[nitro-bench] soundboard lock force-disabled");
+      } catch { /* vol */ }
+    }
+    const mute = except(() => byName("handleSpeakingWhileMuted"));
+    if (mute && typeof mute.handleSpeakingWhileMuted === "function") {
+      try {
+        teardown.push(patcher.instead("handleSpeakingWhileMuted", mute, (args, orig) => {
+          if (state.guard) return undefined; // swallow mute-gated speaking suppression
+          return orig(...args);
+        }));
+        state.perks++;
+        console.log("[nitro-bench] muted-speak suppression disabled");
+      } catch { /* vol */ }
+    }
+  }
+
+  // command leftover state helpers
+  function nativeSurface() {
+    const out = [];
+    try {
+      const nmods = common.ReactNative && common.ReactNative.NativeModules;
+      if (nmods) {
+        for (const k of Object.keys(nmods)) {
+          if (/voice|audio|media|engine|sound|rtc|record|opus/i.test(k)) out.push(k);
+        }
+      }
+    } catch { /* vol */ }
+    return out;
   }
 
   // ---------------- broadcast autopilot --------------------------------------------
@@ -271,6 +335,16 @@
 
   function register() {
     cmd({
+      name: "nativemods", displayName: "nativemods",
+      description: "list voice/audio/media native module names",
+      displayDescription: "list voice/audio/media native module names",
+      options: [],
+      execute: () => {
+        const s = nativeSurface();
+        return { content: s.length ? "[nativemods] " + s.join(", ") : "[nativemods] none matched" };
+      }
+    });
+    cmd({
       name: "sbping", displayName: "sbping",
       description: "version + load check", displayDescription: "version + load check",
       options: [],
@@ -304,6 +378,7 @@
         patchNamed(KNOWN_BOOL, true);
         patchNamed(KNOWN_TIER, 3);
         patchNamed(KNOWN_MAX, 100);
+        patchExact();
         wrapPlayModules();
         patchPerksSweep();
         register();
