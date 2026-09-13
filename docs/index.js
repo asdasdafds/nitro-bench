@@ -20,6 +20,17 @@
   let candidates = null;
 
   function except(fn) { try { return fn(); } catch { return undefined; } }
+  function toast(msg) {
+    try { if (vendetta.ui && vendetta.ui.toasts && vendetta.ui.toasts.showToast) vendetta.ui.toasts.showToast(msg); } catch { /* vol */ }
+    try { if (common.toasts && common.toasts.showToast) common.toasts.showToast(msg); } catch { /* vol */ }
+  }
+  function tryExec(def) {
+    const real = def.execute;
+    def.execute = (args, ctx) => {
+      try { return real(args, ctx); } catch (e) { return { content: "[nitro-bench error] " + String(e && e.message || e) }; }
+    };
+    return def;
+  }
 
   // ---------------- premium spoof (client-side) -----------------------------------
   function patchPremium() {
@@ -207,9 +218,17 @@
 
   // ---------------- commands --------------------------------------------------------
   const unreg = [];
-  function cmd(def) { if (commands && typeof commands.registerCommand === "function") unreg.push(commands.registerCommand(def)); }
+  function cmd(def) { if (commands && typeof commands.registerCommand === "function") unreg.push(commands.registerCommand(tryExec(def))); }
 
   function register() {
+    cmd({
+      name: "sbping", displayName: "sbping",
+      description: "version + load check",
+      displayDescription: "version + load check",
+      options: [],
+      execute: () => ({ content: "nitro-bench v4 ok | play=" + (state.play || "none") })
+    });
+
     cmd({
       name: "sb", displayName: "sb",
       description: "list or play a soundboard sound",
@@ -292,13 +311,19 @@
     description: "nitro + boost-tier spoof, soundboard unlock, /sb play, /sbdump.",
     authors: [{ name: "asdasdafds", id: "258577658" }],
     onLoad() {
-      except(() => { state.spoof = vendetta.plugin.storage.spoof ?? true; });
-      state.guard = state.spoof;
-      console.warn("[nitro-bench] starting");
-      patchPremium();
-      patchBoost();
-      register();
-      console.log("[nitro-bench] loaded");
+      try {
+        except(() => { state.spoof = vendetta.plugin.storage.spoof ?? true; });
+        state.guard = state.spoof;
+        console.warn("[nitro-bench] starting");
+        patchPremium();
+        patchBoost();
+        register();
+        console.log("[nitro-bench] loaded");
+        toast("[nitro-bench] loaded OK");
+      } catch (e) {
+        console.error("[nitro-bench] LOAD FAIL", e);
+        toast("[nitro-bench] LOAD FAIL: " + String(e && e.message || e));
+      }
     },
     onUnload() {
       teardown.forEach((u) => except(() => u()));
